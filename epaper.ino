@@ -19,9 +19,9 @@
 #define SCREEN_WIDTH  200
 #define SCREEN_HEIGHT 200
 
-#define FONT_SMALL FreeSans9pt7b
-#define FONT_MED   FreeSansBold9pt7b
-#define FONT_BIG   FreeSansBold64pt7b
+#define FONT_SMALL    FreeSans9pt7b
+#define FONT_MED      FreeSansBold9pt7b
+#define FONT_BIG      FreeSansBold64pt7b
 
 #define BUTTON 2
 #define LED    8
@@ -29,24 +29,24 @@
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(CS, DC, RST, BUSY));
 
 Preferences prefs;
-// int count;
 RTC_DATA_ATTR int count = 0;
 
-// Constants for button behavior
-const unsigned long DEBOUNCE        = 50;     // milliseconds
-const unsigned long LONG_PRESS_TIME = 500;
+const unsigned long    DEBOUNCE           = 50;     // milliseconds
+const unsigned long    LONG_PRESS_TIME    = 500;
+const bool             RELEASED           = LOW;
+const bool             PRESSED            = HIGH;
 
 // State variables
 bool                   LongPressTriggered = false;
-volatile bool          state              = LOW;
+volatile bool          buttonState        = RELEASED;
 volatile int           releaseCount       = 0;
 volatile unsigned long lastTransitionTime = 0;
 
-enum ButtonState {IDLE, PRESSED, RELEASED, SHORT_PRESS, LONG_PRESS};
+enum Action {IDLE, SHORT_PRESS, LONG_PRESS};
 
-ButtonState checkButton() {
+Action checkButton() {
 
-  if (!LongPressTriggered && state == HIGH && (millis() - lastTransitionTime) > LONG_PRESS_TIME) {
+  if (!LongPressTriggered && buttonState == PRESSED && (millis() - lastTransitionTime) > LONG_PRESS_TIME) {
       LongPressTriggered = true;
       releaseCount = 0;
       return LONG_PRESS;
@@ -70,20 +70,19 @@ void IRAM_ATTR buttonISR() {
   lastTransitionTime = now;
 
   // flip
-  state = !state;
-  digitalWrite(LED, state);
+  buttonState = !buttonState;
+  digitalWrite(LED, buttonState);
 
   // press
   /*
-  if (state == HIGH) {
+  if (state == PRESSED) {
   }
   */
 
   // release 
-  if (state == LOW) {
+  if (buttonState == RELEASED) {
     if (LongPressTriggered) {
       LongPressTriggered = false;
-      releaseCount = 0;
     }
     else {
       releaseCount = releaseCount + 1;
@@ -96,29 +95,24 @@ void setup() {
 
   Serial.begin(115200);
 
-  int wakeCause = (int)esp_sleep_get_wakeup_cause();
-  Serial.printf("Wake cause: %d\n", wakeCause);
-
   pinMode(LED, OUTPUT);
   pinMode(BUTTON, INPUT_PULLUP);
 
-  if (wakeCause == 7) {
-    Serial.printf("Wake on button\n");
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+    Serial.printf("Wake on button press\n");
 
-    // simulate the button press ISR when waking from sleep
-    delay(100);
-    state = true;
-    digitalWrite(LED, state);
-
+    // simulate the button press ISR when waking from sleep (as ISR doesn't trigger)
+    delay(100);                       // let bouce dissapate
+    buttonState = PRESSED; 
+    digitalWrite(LED, buttonState);
   }
 
-  prefs.begin("storage", false);  // read/write
-  count = prefs.getInt("count", 99);
+  prefs.begin("storage", true);       // read-only: true
+  count = prefs.getInt("count", 0);   // 0 if does not exist
   prefs.end();
 
   SPI.begin(SCL, -1, SDA, CS);
   display.init(115200, false);
-
   display.setPartialWindow(1, 1, 200, 200);
 
   attachInterrupt(digitalPinToInterrupt(BUTTON), buttonISR, CHANGE);
@@ -164,19 +158,16 @@ void paint() {
   display.hibernate();
 }
 
-unsigned long lastDisplay    = 0;
 unsigned long lastHeartBeat  = 0;
-
-#define HEARTBEAT 1000
+const int      HEARTBEAT     = 1000;
 
 void loop() {
-  ButtonState action = IDLE;  
+  Action action;  
 
   action = checkButton();
 
   if (action == SHORT_PRESS) {
     // Serial.println("short press");
-    // Serial.println(count);
     count++;
     paint();
   }
@@ -185,24 +176,25 @@ void loop() {
     // Serial.println("long press");
     count = 0;
     paint();
+    releaseCount = 0;
   }
 
   if ( millis() - lastHeartBeat > HEARTBEAT) {
-    digitalWrite(LED, !state);
+    digitalWrite(LED, !buttonState);
     delay(10);
-    digitalWrite(LED, state);
+    digitalWrite(LED, buttonState);
     lastHeartBeat = millis();
   }
 
-  if (true && (millis() - lastTransitionTime) > 30000 && count != 10) {
-    Serial.println("sleeping");
-    prefs.begin("storage", false);
+  if (true && (millis() - lastTransitionTime) > 20000 && count != 10) {
+    
+    // Serial.println("sleeping");
+    prefs.begin("storage", false);    // Read-Only: false (ie writable)
     prefs.putInt("count", count);
     prefs.end();
+
     esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
   }
   
 }
-
-
