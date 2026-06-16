@@ -7,9 +7,9 @@
 #include <esp_sleep.h>
 #include <Preferences.h>
 
-#define DEBUG         true
+#define DEBUG         false
 
-// epaper
+// epaper interface
 #define BUSY          5   // purple
 #define RST           4   // salmon
 #define DC            3   // white
@@ -32,7 +32,7 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(CS, DC,
 Preferences prefs;
 RTC_DATA_ATTR int count = 0;
 
-const unsigned long         DEBOUNCE           = 10000;     // micro seconds
+const unsigned long         DEBOUNCE           = 1000;     // micro seconds
 const unsigned long         LONG_PRESS_TIME    = 1000000;
 const bool                  RELEASED           = HIGH;
 const bool                  PRESSED            = LOW;
@@ -41,72 +41,47 @@ const bool                  PRESSED            = LOW;
 bool                        LongPressTriggered     = false;
 volatile bool               buttonState            = RELEASED;
 volatile int                releaseCount           = 0;
-volatile unsigned long long lastTransitionTime     = 0;
-unsigned long long          lastButtonStateDisplay = 0;
 
-unsigned int                missedTransitions      = 0;
-unsigned int                ups                    = 0;
-unsigned int                downs                  = 0;
 bool                        previousButtonState    = RELEASED;
+unsigned int                paintCount             = 0;
 
-enum Action {IDLE, SHORT_PRESS, LONG_PRESS};
+volatile unsigned long long lastTriggerTime        = 0;
+volatile unsigned long long buttonPressTime        = 0;
 
-Action checkButton() {
-
-  previousButtonState = buttonState;
-  buttonState = digitalRead(BUTTON);
-  if (previousButtonState != buttonState) {
-    missedTransitions ++;
-    lastTransitionTime = esp_timer_get_time();
-
-    if (DEBUG) Serial.printf("        MISSED transition: %d\n", buttonState);
-    if (buttonState == RELEASED) {
-      releaseCount = releaseCount + 1;
-    }
-  }
-
-  if (!LongPressTriggered && buttonState == PRESSED  && (esp_timer_get_time() - lastTransitionTime) > LONG_PRESS_TIME) {
-      LongPressTriggered = true;
-      releaseCount = 0;
-      return LONG_PRESS;
-  }
-
-  if (releaseCount > 0) {
-    releaseCount = releaseCount - 1;
-    return SHORT_PRESS;
-  }
-
-  return IDLE;
-}
+volatile int                transitionCount        = 0;
+volatile int                debounceCount          = 0;
+volatile unsigned long long lastTransitionTime     = 0;
 
 void IRAM_ATTR buttonISR() {
-  
   unsigned long long now = esp_timer_get_time();
-  
-  if ( (now - lastTransitionTime) < DEBOUNCE) {
+  unsigned long long triggerDelta;
+
+  triggerDelta = now - lastTriggerTime;
+  lastTriggerTime = now;
+
+  if ( triggerDelta < DEBOUNCE) {
+    // debounceCount = debounceCount + 1;
     return;
   }
 
-  lastTransitionTime = now;
+  // transitionCount = transitionCount + 1;
+
   buttonState = digitalRead(BUTTON);
 
-  if (buttonState == RELEASED) {
-    ups ++;
+  // press
+  if (buttonState == PRESSED) {
+    // press
+    buttonPressTime = now;
+    return;
+  }
+  
+  // release
+  if (LongPressTriggered) {
+      LongPressTriggered = false;
   }
   else {
-    downs ++;
+    releaseCount = releaseCount + 1;
   }
-
-  // release 
-  if (buttonState == RELEASED) {
-    if (LongPressTriggered) {
-      LongPressTriggered = false;
-    }
-    else {
-      releaseCount = releaseCount + 1;
-    }
-  }
-
 }
 
 void setup() {
@@ -120,7 +95,6 @@ void setup() {
     if (DEBUG) Serial.printf("Wake on button press\n");
 
     // simulate the button press ISR when waking from sleep (as ISR doesn't trigger)
-    // delay(50);                       // let bouce dissapate
     buttonState = PRESSED; 
     lastTransitionTime = 0;
     LongPressTriggered = false;
@@ -145,17 +119,17 @@ void paint() {
   int16_t x1, y1;
   uint16_t w, h;
 
-  if (DEBUG) {
+  paintCount++;
+
+  /**
     Serial.print("paint: ");
     // Serial.printf("count: %d ", count);
     Serial.printf("buttonState: %d ", buttonState);
     Serial.printf("prevousButtonState: %d ", previousButtonState);
     Serial.printf("missedTransitions: %d ", missedTransitions);
-    // Serial.printf("lastTransitionTime: %d ", lastTransitionTime / 1000);
-    Serial.printf("ups: %d downs: %d ", ups, downs);
     Serial.print("\n");
     // return;
-  }
+  */
 
   display.setRotation(1);  // Landscape
   display.setPartialWindow(0, 0, 200, 200);
@@ -166,13 +140,23 @@ void paint() {
     display.setFont(&FONT_MED);
     display.setTextSize(1.0);
 
-    display.getTextBounds("ROW COUNTER", 0, 0, &x1, &y1, &w, &h);
-    display.setCursor((SCREEN_WIDTH - w) / 2, 35);
-    display.print("ROW COUNTER");
+    // display.getTextBounds("ROW COUNTER", 0, 0, &x1, &y1, &w, &h);
+    // display.setCursor((SCREEN_WIDTH - w) / 2, 35);
+    // display.print("ROW COUNTER");
 
+    /*
+    display.setCursor(1, 170);
+    display.print(paintCount); display.print(" "); 
+    display.print(transitionCount); display.print(" ");
+    display.print(debounceCount); display.print(" ");
+    display.print(releaseCount); display.print(" ");
+    */
+
+    /*
     display.getTextBounds("Click to Increase", 0, 0, &x1, &y1, &w, &h);
     display.setCursor((SCREEN_WIDTH - w) / 2, 170);
     display.print("Click to increase");
+    */
 
     display.getTextBounds("Hold to Zero", 0, 0, &x1, &y1, &w, &h);
     display.setCursor((SCREEN_WIDTH - w) / 2, 190);
@@ -189,35 +173,26 @@ void paint() {
   display.hibernate();
 }
 
-unsigned long lastHeartBeat  = 0;
-const int     HEARTBEAT      = 1000;
-
 void loop() {
 
-  Action action = checkButton();
+  // long press
+  if (buttonState == PRESSED && (esp_timer_get_time() - buttonPressTime) > LONG_PRESS_TIME) {
+    LongPressTriggered = true;
+    releaseCount = 0;
+    if (count != 0) {
+      count = 0;
+      paint();
+    }
+  }
 
-  if (action == SHORT_PRESS) {
-    if (DEBUG) Serial.println("short press");
-    count++;
+  // short press
+  if (releaseCount > 0) {
+    releaseCount = releaseCount - 1;
+    count ++;
     paint();
   }
 
-  if (action == LONG_PRESS) {
-    Serial.println("long press");
-    count = 0;
-    paint();
-  }
-
-  /*
-  if ( esp_timer_get_time() - lastHeartBeat > HEARTBEAT) {
-    digitalWrite(LED, !buttonState);
-    delay(10);
-    digitalWrite(LED, buttonState);
-    lastHeartBeat = esp_timer_get_time();
-  }
-  */
-
-  if (true && (esp_timer_get_time() - lastTransitionTime) > 15000000 && releaseCount == 0 && count != 10) {
+  if (true && (esp_timer_get_time() - lastTriggerTime) > 15000000 && count != 10) {
 
     if (DEBUG) Serial.println("sleeping");
     prefs.begin("storage", false);    // Read-Only: false (ie writable)
@@ -226,7 +201,6 @@ void loop() {
 
     esp_deep_sleep_enable_gpio_wakeup(1ULL << BUTTON, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
-    
   }
   
 }
